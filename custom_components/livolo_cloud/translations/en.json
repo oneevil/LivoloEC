@@ -1,0 +1,10 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Livolo EC Cloud",
+        "description": "Enter Livolo account credentials"
+      }
+    }
+  }
+}
