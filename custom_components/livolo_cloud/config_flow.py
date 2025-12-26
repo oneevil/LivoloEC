@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import uuid
+
 import voluptuous as vol
 
 from homeassistant import config_entries
@@ -58,14 +59,14 @@ class LivoloConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class LivoloOptionsFlowHandler(config_entries.OptionsFlow):
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        data = self.config_entry.data
+        data = self._config_entry.data
         schema = vol.Schema(
             {
                 vol.Required(CONF_EMAIL, default=data.get(CONF_EMAIL, "")): str,
