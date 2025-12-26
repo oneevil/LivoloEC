@@ -4,8 +4,10 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 import uuid
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qsl, quote, quote_plus
@@ -33,6 +35,10 @@ def _b64_md5(data: bytes) -> str:
 
 def _hmac_sha1_b64(secret: str, msg: str) -> str:
     return base64.b64encode(hmac.new(secret.encode(), msg.encode(), hashlib.sha1).digest()).decode()
+
+
+def _hmac_sha1_hex(secret: str, msg: str) -> str:
+    return hmac.new(secret.encode(), msg.encode(), hashlib.sha1).hexdigest()
 
 
 def _canon_resource(url: str) -> str:
@@ -155,9 +161,27 @@ class LivoloClient:
         self._ali_ep: Optional[str] = None
         self._iot_token: Optional[str] = None
 
+        self._aep_client_id: str = uuid.uuid4().hex[:8]
+        self._aep_device_sn: str = base64.urlsafe_b64encode(os.urandom(24)).decode().rstrip("=")
+        self._aep_product_key: Optional[str] = None
+        self._aep_device_name: Optional[str] = None
+        self._aep_device_secret: Optional[str] = None
+
     @property
     def iot_token(self) -> Optional[str]:
         return self._iot_token
+
+    @property
+    def aep_product_key(self) -> Optional[str]:
+        return self._aep_product_key
+
+    @property
+    def aep_device_name(self) -> Optional[str]:
+        return self._aep_device_name
+
+    @property
+    def aep_device_secret(self) -> Optional[str]:
+        return self._aep_device_secret
 
     async def _post_json(self, url: str, headers: Dict[str, str], payload: Any) -> Dict[str, Any]:
         async with self._session.post(url, headers=headers, json=payload) as resp:
@@ -176,7 +200,11 @@ class LivoloClient:
                 raise LivoloApiError(f"Bad JSON from {url}: {e}; body={text[:200]}") from e
 
     async def ensure_login(self) -> None:
-        if self._iot_token:
+        if self._iot_token and self._aep_device_secret and self._aep_product_key and self._aep_device_name:
+            return
+
+        if self._iot_token and self._ali_ep and not (self._aep_device_secret and self._aep_product_key and self._aep_device_name):
+            await self._ensure_aep_credentials()
             return
 
         region_body = {"email": self._email}
@@ -221,7 +249,7 @@ class LivoloClient:
                 "utdid": "ffffffffffffffffffffffff",
                 "netType": "wifi",
                 "umidToken": self._umid_token,
-                "locale": "ru_RU",
+                "locale": "en-US",
                 "appVersionName": "5.4.16",
                 "deviceId": device_id,
                 "routerMac": self._router_mac,
@@ -278,7 +306,7 @@ class LivoloClient:
         cs_payload = {
             "id": req_id,
             "params": {"request": {"authCode": sid, "accountType": "OA_SESSION", "appKey": APP_KEY}},
-            "request": {"apiVer": "1.0.4"},
+            "request": {"apiVer": "1.0.4", "language": "en-US"},
             "version": "1.0",
         }
         cs_bytes = json.dumps(cs_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -312,6 +340,70 @@ class LivoloClient:
 
         self._iot_token = iot_token
 
+        await self._ensure_aep_credentials()
+
+    async def _ensure_aep_credentials(self) -> None:
+        if self._aep_device_secret and self._aep_product_key and self._aep_device_name:
+            return
+
+        if not self._ali_ep:
+            raise LivoloAuthError("AEP auth requested before ali_ep is set")
+
+        req_id = str(uuid.uuid4())
+        ts = str(int(time.time() * 1000))
+
+        sign_content = (
+            f"appKey{APP_KEY}"
+            f"clientId{self._aep_client_id}"
+            f"deviceSn{self._aep_device_sn}"
+            f"timestamp{ts}"
+        )
+        sign = _hmac_sha1_hex(APP_SECRET, sign_content)
+
+        payload = {
+            "id": req_id,
+            "params": {
+                "authInfo": {
+                    "clientId": self._aep_client_id,
+                    "sign": sign,
+                    "deviceSn": self._aep_device_sn,
+                    "timestamp": ts,
+                }
+            },
+            "request": {"apiVer": "1.0.0", "language": "en-US"},
+            "version": "1.0",
+        }
+
+        url = (
+            f"https://{self._ali_ep}.api-iot.aliyuncs.com/app/aepauth/handle"
+            f"?x-ca-request-id={req_id}"
+        )
+
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        headers = _sign_api_iot(url, body)
+        headers["host"] = f"{self._ali_ep}.api-iot.aliyuncs.com"
+
+        resp = await self._post_bytes(url, headers, body)
+        if not isinstance(resp, dict) or resp.get("code") != 200:
+            raise LivoloAuthError(f"AEP auth failed: {resp}")
+
+        data = resp.get("data") or {}
+        self._aep_device_secret = data.get("deviceSecret")
+        self._aep_product_key = data.get("productKey")
+        self._aep_device_name = data.get("deviceName")
+
+        _LOGGER = logging.getLogger(__name__)
+
+        _LOGGER.debug(
+            "AEP credentials received: productKey=%s deviceName=%s deviceSecret=%s",
+            self._aep_product_key,
+            self._aep_device_name,
+            self._aep_device_secret,
+        )
+
+        if not (self._aep_device_secret and self._aep_product_key and self._aep_device_name):
+            raise LivoloAuthError(f"AEP auth incomplete: {data}")
+
     async def list_devices(self) -> List[LivoloDevice]:
         await self.ensure_login()
         assert self._ali_ep and self._iot_token
@@ -321,7 +413,7 @@ class LivoloClient:
         hq_payload = {
             "id": req_id,
             "params": {"pageSize": 20, "pageNo": 1},
-            "request": {"apiVer": "1.1.0", "iotToken": self._iot_token},
+            "request": {"apiVer": "1.1.0", "language": "en-US", "iotToken": self._iot_token},
             "version": "1.0",
         }
         hq_bytes = json.dumps(hq_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
@@ -352,7 +444,7 @@ class LivoloClient:
                 eq_payload = {
                     "id": req_id,
                     "params": {"pageSize": page_size, "pageNo": page, "homeId": str(hid)},
-                    "request": {"apiVer": "1.0.8", "iotToken": self._iot_token},
+                    "request": {"apiVer": "1.0.8", "language": "en-US", "iotToken": self._iot_token},
                     "version": "1.0",
                 }
                 eq_bytes = json.dumps(eq_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
