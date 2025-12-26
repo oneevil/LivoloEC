@@ -8,8 +8,10 @@ CONF_UMID_TOKEN = "umid_token"
 APP_KEY = "27582869"
 APP_SECRET = "5f43ddf42f5b46b0951da2c222a797f3"
 
-PLATFORMS = ["sensor"]
+PLATFORMS = ["sensor", "switch"]
 UPDATE_INTERVAL_SECONDS = 60
+
+SIGNAL_MQTT_STATE = "livolo_cloud_mqtt_state"
 
 DEVICE_MODEL_TRANSLATIONS = {
     "1路开关": ("1-Way Switch", "Одноклавишный выключатель"),

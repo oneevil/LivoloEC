@@ -7,10 +7,12 @@ import json
 import os
 import time
 import uuid
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlparse, parse_qsl, quote, quote_plus
+from .mqtt_control import build_aliyun_app_mqtt_creds, publish_switch_set
 
 import aiohttp
 
@@ -492,3 +494,30 @@ class LivoloClient:
                 page += 1
 
         return [d for d in devices if d.element_id]
+
+    async def set_switch(self, *, element_id: str, on: bool, prop: str = "PowerSwitch_1") -> None:
+        await self.ensure_login()
+
+        if not (self._ali_ep and self._aep_product_key and self._aep_device_name and self._aep_device_secret):
+            raise LivoloApiError("AEP credentials not available")
+
+        creds = build_aliyun_app_mqtt_creds(
+            region=self._ali_ep,
+            aep_product_key=self._aep_product_key,
+            aep_device_name=self._aep_device_name,
+            aep_device_secret=self._aep_device_secret,
+            use_tls=True,
+        )
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: publish_switch_set(
+                creds=creds,
+                aep_product_key=self._aep_product_key,
+                aep_device_name=self._aep_device_name,
+                target_iot_id=element_id,
+                prop_identifier=prop,
+                on=on,
+            ),
+        )
